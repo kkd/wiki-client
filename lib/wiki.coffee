@@ -10,9 +10,18 @@
 
 wiki = {}
 
+# known use: (eventually all server directed xhr and some tags)
+
+siteAdapter = require './siteAdapter'
+wiki.local = siteAdapter.local
+wiki.origin = siteAdapter.origin
+wiki.recycler = siteAdapter.recycler
+wiki.site = siteAdapter.site
+
 # known use: wiki.asSlug wiki-plugin-reduce/client/reduce.coffee:
 
 wiki.asSlug = require('./page').asSlug
+wiki.newPage = require('./page').newPage
 
 # known use: wiki.createItem wiki-plugin-parse/client/parse.coffee:
 # known use: wiki.removeItem wiki-plugin-parse/client/parse.coffee:
@@ -42,6 +51,7 @@ wiki.dialog = dialog.open
 link = require('./link')
 wiki.createPage = link.createPage ##
 wiki.doInternalLink = link.doInternalLink
+wiki.showResult = link.showResult
 
 # known use: wiki.getScript  wiki-plugin-bars/client/bars.coffee:
 # known use: wiki.getScript  wiki-plugin-code/client/code.coffee:
@@ -99,8 +109,13 @@ wiki.log = (things...) ->
   console.log things... if console?.log?
 
 # known use: wiki.neighborhood wiki-plugin-activity/client/activity.coffee:
+# known use: wiki.neighborhoodObject  wiki-plugin-activity/client/activity.coffee:
+# known use: wiki.neighborhoodObject  wiki-plugin-roster/client/roster.coffee:
 
-wiki.neighborhood = require('./neighborhood').sites
+
+neighborhood = require './neighborhood'
+wiki.neighborhood = neighborhood.sites
+wiki.neighborhoodObject = neighborhood
 
 # known use: wiki.pageHandler  wiki-plugin-changes/client/changes.coffee:
 # known use: wiki.pageHandler  wiki-plugin-map/client/map.coffee:
@@ -145,9 +160,9 @@ wiki.textEditor = editor.textEditor
 
 wiki.util = require './util'
 
-# known use: wiki.persona wiki-node-server/views/static.html
+# known use: wiki.security views/static.html
+wiki.security = require './security'
 
-wiki.persona = require './persona'
 
 # known use: require wiki-clint/lib/synopsis wiki-node-server/lib/page.coffee
 # known use: require wiki-clint/lib/synopsis wiki-node-server/lib/leveldb.js
@@ -156,6 +171,7 @@ wiki.persona = require './persona'
 
 wiki.createSynopsis = require('./synopsis') ##
 
+# known uses: (none yet)
+wiki.lineup = require './lineup'
 
 module.exports = wiki
-

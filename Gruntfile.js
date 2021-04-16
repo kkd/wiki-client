@@ -3,7 +3,9 @@ module.exports = function (grunt) {
   grunt.loadNpmTasks('grunt-contrib-watch');
   grunt.loadNpmTasks('grunt-mocha-test');
   grunt.loadNpmTasks('grunt-contrib-clean');
-  grunt.loadNpmTasks('grunt-contrib-uglify');
+  grunt.loadNpmTasks('grunt-contrib-uglify-es');
+  grunt.loadNpmTasks('grunt-git-authors');
+  grunt.loadNpmTasks('grunt-retire');
 
   // N.B. The development build includes paths in the mapfile, at the browserify step, that are not accessable
   //      from the browser.
@@ -42,6 +44,11 @@ module.exports = function (grunt) {
       ]
     },
 
+    retire: {
+      js: ['client/js/*.js'],
+      options: {}
+    },
+
     // tidy-up before we start the build
     clean: ['build/*', 'client/client.js', 'client/client.map', 'client/client.*.js', 'client/client.*.map', 'client/test/testclient.js'],
 
@@ -51,7 +58,7 @@ module.exports = function (grunt) {
         src: ['./client.coffee'],
         dest: 'client/client.max.js',
         options: {
-          transform: ['coffeeify'],
+          transform: [['coffeeify', {transpile: {presets: ['@babel/preset-env']}}]],
           browserifyOptions: {
             extensions: ".coffee"
           }
@@ -64,7 +71,7 @@ module.exports = function (grunt) {
         src: ['./testclient.coffee'],
         dest: 'client/test/testclient.js',
         options: {
-          transform: ['coffeeify'],
+          transform: [['coffeeify', {transpile: {presets: ['@babel/preset-env']}}]],
           browserifyOptions: {
             extensions: ".coffee"
           }
@@ -83,8 +90,8 @@ module.exports = function (grunt) {
           sourceMapName: 'client/client.map',
           banner: '/*! <%= pkg.title || pkg.name %> - v<%= pkg.version %> - ' +
                   '<%= grunt.template.today("yyyy-mm-dd") %>\n' +
-                  ' * Copyright <%= grunt.template.today("yyyy") %> <%= pkg.author.name %> and other contributors;' +
-                  ' Licensed <%= _.pluck(pkg.licenses, "type").join(", ") %> */'
+                  ' * Copyright <%= grunt.template.today("yyyy") %> <%= pkg.author.name %> and other contributors;\n' +
+                  ' * Released under the <%= pkg.license %> license */',
         },
         files: {
           'client/client.js': ['client/client.max.js']
@@ -96,7 +103,7 @@ module.exports = function (grunt) {
       test: {
         options: {
           reporter: 'spec',
-          require: 'coffee-script/register'
+          require: 'coffeescript/register'
         },
         src: [
           'test/util.coffee',
@@ -119,26 +126,13 @@ module.exports = function (grunt) {
     }
   });
 
-  grunt.registerTask( "update-authors", function () {
-    var getAuthors = require("grunt-git-authors"),
-    done = this.async();
-
-    getAuthors({
-      priorAuthors: grunt.config( "authors.prior")
-    }, function(error, authors) {
-      if (error) {
-        grunt.log.error(error);
-        return done(false);
-      }
-
-      grunt.file.write("AUTHORS.txt",
-      "Authors ordered by first contribution\n\n" +
-      authors.join("\n") + "\n");
-    });
-  });
-
   // build without sourcemaps
   grunt.registerTask('build', ['clean', 'mochaTest', 'browserify:packageClient', 'browserify:testClient', 'uglify:packageClient']);
+
+  // check for out-of-date libraries and known vulnerabilities
+
+  grunt.registerTask('check', ['retire']);
+
 
   // the default is to do the production build.
   grunt.registerTask('default', ['build']);

@@ -5,6 +5,7 @@
 formatDate = require('./util').formatDate
 random = require './random'
 revision = require './revision'
+synopsis = require './synopsis'
 _ = require 'underscore'
 
 # http://pragprog.com/magazines/2011-08/decouple-your-apps-with-eventdriven-coffeescript
@@ -15,6 +16,9 @@ pageEmitter = new EventEmitter
 # TODO: better home for asSlug
 asSlug = (name) ->
   name.replace(/\s/g, '-').replace(/[^A-Za-z0-9-]/g, '').toLowerCase()
+
+asTitle = (slug) ->
+  slug.replace(/-/g, ' ')
 
 nowSections = (now) ->
   [
@@ -46,10 +50,13 @@ newPage = (json, site) ->
     page.plugin?
 
   isRemote = ->
-    ! (site in [undefined, null, 'view', 'origin', 'local'])
+    ! (site in [undefined, null, 'view', 'origin', 'local', 'recycler'])
 
   isLocal = ->
     site == 'local'
+
+  isRecycler = ->
+    site == 'recycler'
 
   getRemoteSite = (host = null) ->
     if isRemote() then site else host
@@ -84,9 +91,51 @@ newPage = (json, site) ->
   getRevision = ->
     page.journal.length-1
 
+  getDate = ->
+    action = page.journal[getRevision()]
+    if action?
+      if action.date?
+        return action.date
+    return undefined
+
   getTimestamp = ->
-    date = page.journal[getRevision()].date
-    if date? then formatDate(date) else "Revision #{getRevision()}"
+    action = page.journal[getRevision()]
+    if action?
+      if action.date?
+        formatDate(action.date)
+      else
+        "Revision #{getRevision()}"
+    else
+      "Unrecorded Date"
+
+  getSynopsis = ->
+    synopsis page
+
+  getLinks = ->
+
+    extractPageLinks = (collaborativeLinks, currentItem, currentIndex, array) ->
+      # extract collaborative links 
+      # - this will need extending if we also extract the id of the item containing the link
+      try
+        linkRe = /\[\[([^\]]+)\]\]/g
+        match = undefined
+        while (match = linkRe.exec(currentItem.text)) != null
+          if not collaborativeLinks.has(asSlug(match[1]))
+            collaborativeLinks.set(asSlug(match[1]), currentItem.id)
+      catch err
+        console.log "*** Error extracting links from #{currentIndex} of #{JSON.stringify(array)}", err.message
+      collaborativeLinks
+
+    try
+      pageLinksMap = page.story.reduce( extractPageLinks, new Map())
+    catch err
+      console.log "+++ Extract links on #{page.slug} fails", err
+    if pageLinksMap.size > 0
+      pageLinks = Object.fromEntries(pageLinksMap)
+    else
+      pageLinks = {}
+    pageLinks
+
 
   addItem = (item) ->
     item = _.extend {}, {id: random.itemId()}, item
@@ -98,10 +147,12 @@ newPage = (json, site) ->
     return null
 
   seqItems = (each) ->
-    emitItem = (i) ->
-      return if i >= page.story.length
-      each page.story[i]||{text:'null'}, -> emitItem i+1
-    emitItem 0
+    promise = new Promise (resolve, _reject) ->
+      emitItem = (i) ->
+        return resolve() if i >= page.story.length
+        each page.story[i]||{text:'null'}, -> emitItem i+1
+      emitItem 0
+    return promise
 
   addParagraph = (text) ->
     type = "paragraph"
@@ -124,8 +175,9 @@ newPage = (json, site) ->
       each {action, separator}, -> emitAction i+1
     emitAction 0
 
-  become = (template) ->
-    page.story = template?.getRawPage().story || []
+  become = (story, journal) ->
+    page.story = story?.getRawPage().story || []
+    page.journal = journal?.getRawPage().journal if journal?
 
   siteLineup = ->
     slug = getSlug()
@@ -134,7 +186,8 @@ newPage = (json, site) ->
     else
       "view/welcome-visitors/view/#{slug}"
     if isRemote()
-      "//#{site}/#{path}"
+      # "//#{site}/#{path}"
+      wiki.site(site).getDirectURL(path)
     else
       "/#{path}"
 
@@ -158,6 +211,11 @@ newPage = (json, site) ->
     revision.apply page, action
     site = null if action.site
 
-  {getRawPage, getContext, isPlugin, isRemote, isLocal, getRemoteSite, getRemoteSiteDetails, getSlug, getNeighbors, getTitle, setTitle, getRevision, getTimestamp, addItem, getItem, addParagraph, seqItems, seqActions, become, siteLineup, merge, apply}
+  getCreate = () ->
+    isCreate = (action) -> action.type == 'create'
+    page.journal.reverse().find(isCreate)
 
-module.exports = {newPage, asSlug, pageEmitter}
+  {getRawPage, getContext, isPlugin, isRemote, isLocal, isRecycler, getRemoteSite, getRemoteSiteDetails, getSlug, getNeighbors, getTitle, getLinks, setTitle, getRevision, getDate, getTimestamp, getSynopsis, addItem, getItem, addParagraph, seqItems, seqActions, become, siteLineup, merge, apply, getCreate}
+
+ #module.exports = {newPage, asSlug, pageEmitter}
+  module.exports = {newPage, asSlug, asTitle, pageEmitter}

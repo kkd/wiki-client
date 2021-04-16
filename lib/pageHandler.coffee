@@ -10,6 +10,7 @@ addToJournal = require './addToJournal'
 newPage = require('./page').newPage
 random = require './random'
 lineup = require './lineup'
+neighborhood = require './neighborhood'
 
 module.exports = pageHandler = {}
 
@@ -28,65 +29,62 @@ pageFromLocalStorage = (slug)->
 recursiveGet = ({pageInformation, whenGotten, whenNotGotten, localContext}) ->
   {slug,rev,site,title} = pageInformation
 
+  localBeforeOrigin = {
+    get: (slug, done) ->
+      wiki.local.get slug, (err, page) ->
+        console.log [err, page]
+        if err?
+          wiki.origin.get slug, done
+        else
+          site = 'local'
+          done null, page
+  }
+
   if site
     localContext = []
   else
     site = localContext.shift()
 
   site = 'origin' if site is window.location.host
-  site = null if site=='view'
+  site = 'view' if site == null
 
-  if site?
-    if site == 'local'
-      if localPage = pageFromLocalStorage(pageInformation.slug)
-        #NEWPAGE local from pageHandler.get
-        return whenGotten newPage(localPage, 'local' )
-      else
-        return whenNotGotten()
-    else
-      if site == 'origin'
-        url = "/#{slug}.json"
-      else
-        url = "http://#{site}/#{slug}.json"
-  else
-    url = "/#{slug}.json"
+  adapter = switch site
+    when 'local' then wiki.local
+    when 'origin' then wiki.origin
+    when 'recycler' then wiki.recycler
+    when 'view' then localBeforeOrigin
+    else wiki.site(site)
 
-  $.ajax
-    type: 'GET'
-    dataType: 'json'
-    url: url + "?random=#{random.randomBytes(4)}"
-    data:
-      'title': title
-    success: (page) ->
+  adapter.get "#{slug}.json", (err, page) ->
+    if !err
+      console.log 'got', site, page
       page = revision.create rev, page if rev
-      #NEWPAGE server from pageHandler.get
-      return whenGotten newPage(page, site)
-    error: (xhr, type, msg) ->
-      if (xhr.status != 404) and (xhr.status != 0)
-        console.log 'pageHandler.get error', xhr, xhr.status, type, msg
-        #NEWPAGE trouble from PageHandler.get
-        troublePageObject = newPage {title: "Trouble: Can't Get Page"}, null
-        troublePageObject.addParagraph """
-The page handler has run into problems with this   request.
-<pre class=error>#{JSON.stringify pageInformation}</pre>
-The requested url.
-<pre class=error>#{url}</pre>
-The server reported status.
-<pre class=error>#{xhr.status}</pre>
-The error type.
-<pre class=error>#{type}</pre>
-The error message.
-<pre class=error>#{msg}</pre>
-These problems are rarely solved by reporting issues.
-There could be additional information reported in the browser's console.log.
-More information might be accessible by fetching the page outside of wiki.
-<a href="#{url}" target="_blank">try-now</a>
-"""
-        return whenGotten troublePageObject
-      if localContext.length > 0
-        recursiveGet( {pageInformation, whenGotten, whenNotGotten, localContext} )
+      whenGotten newPage(page, site)
+    else
+      if (err.xhr.status == 404) or (err.xhr.status == 0)
+        if localContext.length > 0
+          recursiveGet( {pageInformation, whenGotten, whenNotGotten, localContext} )
+        else
+          whenNotGotten()
       else
-        whenNotGotten()
+        text = """
+          The page handler has run into problems with this request.
+          <pre class=error>#{JSON.stringify pageInformation}</pre>
+          The requested url.
+          <pre class=error>#{url}</pre>
+          The server reported status.
+          <pre class=error>#{err.xhr?.status}</pre>
+          The error message.
+          <pre class=error>#{err.msg}</pre>
+          These problems are rarely solved by reporting issues.
+          There could be additional information reported in the browser's console.log.
+          More information might be accessible by fetching the page outside of wiki.
+          <a href="#{url}" target="_blank">try-now</a>
+        """
+        trouble = newPage {title: "Trouble: Can't Get Page"}, null
+        trouble.addItem {type:'html', text}
+        whenGotten trouble
+
 
 pageHandler.get = ({whenGotten,whenNotGotten,pageInformation}  ) ->
 
@@ -117,9 +115,9 @@ pushToLocal = ($page, pagePutInfo, action) ->
       page.journal = page.journal.concat({'type':'fork','site':site,'date':(new Date()).getTime()})
       delete action['fork']
   revision.apply page, action
-  localStorage.setItem(pagePutInfo.slug, JSON.stringify(page))
-  addToJournal $page.find('.journal'), action
-  $page.addClass("local")
+  wiki.local.put pagePutInfo.slug, page, () ->
+    addToJournal $page.find('.journal'), action
+    $page.addClass("local")
 
 pushToServer = ($page, pagePutInfo, action) ->
 
@@ -129,20 +127,24 @@ pushToServer = ($page, pagePutInfo, action) ->
   if action.type == 'fork'
     bundle.item = deepCopy pageObject.getRawPage()
 
-  $.ajax
-    type: 'PUT'
-    url: "/page/#{pagePutInfo.slug}/action"
-    data:
-      'action': JSON.stringify(bundle)
-    success: () ->
-      # update pageObject (guard for tests)
-      pageObject.apply action if pageObject?.apply
-      addToJournal $page.find('.journal'), action
-      if action.type == 'fork' # push
-        localStorage.removeItem $page.attr('id')
-    error: (xhr, type, msg) ->
-      action.error = {type, msg, response: xhr.responseText}
-      pushToLocal $page, pagePutInfo, action
+  # we need the original page so we can update the index
+  wiki.origin.get "#{pagePutInfo.slug}.json", (err, originalPage) ->
+    if err
+      originalStory = []
+    else
+      originalStory = originalPage.story or []
+
+    wiki.origin.put pagePutInfo.slug, bundle, (err) ->
+      if err
+        action.error = { type: err.type, msg: err.msg, response: err.xhr.responseText}
+        pushToLocal $page, pagePutInfo, action
+      else
+        pageObject.apply action if pageObject?.apply
+        neighborhood.updateSitemap pageObject
+        neighborhood.updateIndex pageObject, originalStory
+        addToJournal $page.find('.journal'), action
+        if action.type == 'fork'
+          wiki.local.delete $page.attr('id')
 
 pageHandler.put = ($page, action) ->
 
@@ -179,11 +181,12 @@ pageHandler.put = ($page, action) ->
   delete action.site if action.site == 'origin'
 
   # update dom when forking
+  $page.removeClass('plugin')
   if forkFrom
     # pull remote site closer to us
     $page.find('h1').prop('title',location.host)
     $page.find('h1 img').attr('src', '/favicon.png')
-    $page.find('h1 a').attr('href', '/')
+    $page.find('h1 a').attr('href', "/view/welcome-visitors/view/#{pagePutInfo.slug}").attr('target',location.host)
     $page.data('site', null)
     $page.removeClass('remote')
     #STATE -- update url when site changes
@@ -201,3 +204,20 @@ pageHandler.put = ($page, action) ->
     pushToLocal($page, pagePutInfo, action)
   else
     pushToServer($page, pagePutInfo, action)
+
+pageHandler.delete = (pageObject, $page, done) ->
+  console.log 'delete server-side'
+  console.log 'pageObject:', pageObject
+  if pageObject.isRecycler()
+    wiki.recycler.delete "#{pageObject.getSlug()}.json", (err) ->
+      more = ->
+        done err
+      setTimeout(more, 300)
+  else
+    wiki.origin.delete "#{pageObject.getSlug()}.json", (err) ->
+      more = ->
+        # err = null
+        neighborhood.deleteFromSitemap pageObject unless err?
+        neighborhood.deleteFromIndex pageObject unless err?
+        done err
+      setTimeout(more, 300) # simulate server turnaround

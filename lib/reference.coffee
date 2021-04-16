@@ -16,18 +16,17 @@ emit = ($item, item) ->
   site = item.site
   resolve.resolveFrom site, ->
     $item.append """
-      <p style='margin-bottom:3px;'>
+      <p>
         <img class='remote'
-          src='//#{site}/favicon.png'
+          src='#{wiki.site(site).flag()}'
           title='#{site}'
           data-site="#{site}"
           data-slug="#{slug}"
         >
         #{resolve.resolveLinks "[[#{item.title or slug}]]"}
-      </p>
-      <div>
+        —
         #{resolve.resolveLinks(item.text)}
-      </div>
+      </p>
     """
 bind = ($item, item) ->
   $item.dblclick -> editor.textEditor $item, item

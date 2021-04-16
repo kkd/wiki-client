@@ -9,6 +9,7 @@ pageHandler = require './pageHandler'
 editor = require './editor'
 synopsis = require './synopsis'
 drop = require './drop'
+active = require './active'
 
 escape = (line) ->
   line
@@ -29,15 +30,28 @@ emit = ($item, item) ->
       <tr><td><ul id=format><td><ul id=data><td><ul id=other>
     """
     for info in window.catalog
-      column = info.category || 'other'
-      column = 'other' unless column in ['format', 'data']
-      menu.find('#'+column).append """
-        <li><a class="menu" href="#" title="#{info.title}">#{info.name}</a></li>
-      """
+      if info and info.category
+        column = info.category
+        column = 'other' unless column in ['format', 'data']
+        menu.find('#'+column).append """
+          <li><a class="menu" href="#" title="#{info.title}">#{info.name}</a></li>
+        """
     menu.find('a.menu').click (evt)->
-      $item.removeClass('factory').addClass(item.type=evt.target.text.toLowerCase())
+      pluginName = evt.target.text
+      pluginType = pluginName.toLowerCase()
+      $item.removeClass('factory').addClass(item.type=pluginType)
       $item.unbind()
-      editor.textEditor $item, item
+      evt.preventDefault()
+      active.set $item.parents(".page")
+      catalogEntry = window.catalog.find((entry) -> pluginName is entry.name)
+      if catalogEntry.editor
+        try
+          window.plugins[pluginType].editor $item, item
+        catch error
+          console.log("#{pluginName} Plugin editor failed: #{error}. Falling back to textEditor")
+          editor.textEditor($item, item)
+      else
+        editor.textEditor $item, item
 
   showPrompt = ->
     $item.append "<p>#{resolve.resolveLinks(item.prompt, escape)}</b>"
@@ -47,7 +61,8 @@ emit = ($item, item) ->
   else if window.catalog?
     showMenu()
   else
-    $.getJSON '/system/factories.json', (data) ->
+    wiki.origin.get 'system/factories.json', (error, data) ->
+      console.log 'factory', data
       window.catalog = data
       showMenu()
 
@@ -74,19 +89,34 @@ bind = ($item, item) ->
     syncEditAction()
 
   addReference = (data) ->
-    $.getJSON "http://#{data.site}/#{data.slug}.json", (remote) ->
-      item.type = 'reference'
-      item.site = data.site
-      item.slug = data.slug
-      item.title = remote.title || data.slug
-      item.text = synopsis remote
-      syncEditAction()
-      neighborhood.registerNeighbor item.site if item.site?
+    wiki.site(data.site).get "#{data.slug}.json", (err, remote) ->
+      if !err
+        item.type = 'reference'
+        item.site = data.site
+        item.slug = data.slug
+        item.title = remote.title || data.slug
+        item.text = synopsis remote
+        syncEditAction()
+        neighborhood.registerNeighbor item.site if item.site?
 
   addVideo = (video) ->
     item.type = 'video'
     item.text = "#{video.text}\n(double-click to edit caption)\n"
     syncEditAction()
+
+  addRemoteImage = (url) ->
+    # give some feedback, in case this is going to take a while...
+    document.documentElement.style.cursor = 'wait'
+    fetchRemoteImage(url)
+      .then (dataURL) ->
+        resizeImage dataURL
+      .then (resizedImageURL) ->
+        document.documentElement.style.cursor = 'default'
+        item.type = 'image'
+        item.url = resizedImageURL
+        item.source = url
+        item.caption ||= "Remote image"
+        syncEditAction()
 
   readFile = (file) ->
     if file?
@@ -94,10 +124,12 @@ bind = ($item, item) ->
       reader = new FileReader()
       if majorType == "image"
         reader.onload = (loadEvent) ->
-          item.type = 'image'
-          item.url = loadEvent.target.result
-          item.caption ||= "Uploaded image"
-          syncEditAction()
+          resizeImage loadEvent.target.result
+          .then (resizedImageURL) ->
+            item.type = 'image'
+            item.url = resizedImageURL
+            item.caption ||= "Uploaded image"
+            syncEditAction()
         reader.readAsDataURL(file)
       else if majorType == "text"
         reader.onload = (loadEvent) ->
@@ -114,7 +146,11 @@ bind = ($item, item) ->
         reader.readAsText(file)
       else
         punt
-          file: file
+          name: file.name
+          type: file.type
+          size: file.size
+          fileName: file.fileName
+          lastModified: file.lastModified
 
   $item.dblclick (e) ->
     if e.shiftKey
@@ -130,6 +166,7 @@ bind = ($item, item) ->
     page: addReference
     file: readFile
     video: addVideo
+    image: addRemoteImage
     punt: punt
 
 # from http://www.bennadel.com/blog/1504-Ask-Ben-Parsing-CSV-Strings-With-Javascript-Exec-Regular-Expression-Command.htm
@@ -158,5 +195,84 @@ arrayToJson = (array) ->
       obj[k] = v if v? && (v.match /\S/) && v != 'NULL'
     obj
   (rowToObject row for row in array)
+
+
+fetchRemoteImage = (url) ->
+  arrayBufferToBase64 = (buffer) ->
+    binary = ''
+    bytes = [].slice.call(new Uint8Array(buffer))
+    bytes.forEach((b) -> binary += String.fromCharCode(b));
+    return window.btoa(binary);
+
+  fetch(url)
+    .then (response) ->
+      if response.ok
+        return response
+      throw new Error('Unable to fetch image')
+    .then (response) ->
+      response.arrayBuffer()
+        .then (buffer) ->
+          imgStr = 'data:image/jpeg;base64,'
+          imgStr += arrayBufferToBase64(buffer)
+          return imgStr
+    
+    .catch (error) ->
+      console.log 'Unable to fetch remote image'
+    
+
+
+# from https://web.archive.org/web/20140327091827/http://www.benknowscode.com/2014/01/resizing-images-in-browser-using-canvas.html
+# Patrick Oswald version from comment, coffeescript and further simplification for wiki
+
+resizeImage = (dataURL) ->
+  src = new Image
+  cW = undefined
+  cH = undefined
+  # target size
+  tW = 500
+  tH = 300
+  # image quality
+  imageQuality = 0.5
+
+  smallEnough = (img) ->
+    img.width <= tW or img.height <= tH
+
+  new Promise (resolve) ->
+    src.src = dataURL
+    src.onload = ->
+      resolve()
+  .then () ->
+    cW = src.naturalWidth
+    cH = src.naturalHeight
+  .then () ->
+    # determine size for first squeeze
+    return if smallEnough src
+
+    oversize = Math.max 1, Math.min cW/tW, cH/tH
+    iterations = Math.floor Math.log2 oversize
+    prescale = oversize / 2**iterations
+
+    cW = Math.round(cW / prescale)
+    cH = Math.round(cH / prescale)
+
+  .then () ->
+    new Promise (resolve) ->
+      tmp = new Image
+      tmp.src = src.src
+      tmp.onload = ->
+        if smallEnough tmp
+          return resolve dataURL  
+        canvas = document.createElement('canvas')
+        canvas.width = cW
+        canvas.height = cH
+        context = canvas.getContext('2d')
+        context.drawImage tmp, 0, 0, cW, cH
+        dataURL = canvas.toDataURL('image/jpeg', imageQuality)
+        cW /= 2
+        cH /= 2
+        tmp.src = dataURL
+  .then ->
+    return dataURL
+
 
 module.exports = {emit, bind}

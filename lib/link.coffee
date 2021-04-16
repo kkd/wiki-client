@@ -6,15 +6,19 @@
 lineup = require './lineup'
 active = require './active'
 refresh = require './refresh'
-{asSlug, pageEmitter} = require './page'
+{asTitle, asSlug, pageEmitter} = require './page'
 
+#createPage = (name, loc, title=null) ->
 createPage = (slug, loc, title=null) ->
   site = loc if loc and loc isnt 'view'
+  title = asTitle(name) unless title
   $page = $ """
-    <div class="page" id="#{slug}">
-      <div class="twins"> <p> </p> </div>
-      <div class="header">
-        <h1> <img class="favicon" src="#{ if site then "//#{site}" else "" }/favicon.png" height="32px"> #{name} </h1>
+    <div class="page" id="#{slug}" tabindex="-1">
+      <div class="paper">
+        <div class="twins"> <p> </p> </div>
+        <div class="header">
+          <h1> <img class="favicon" src="#{wiki.site(site).flag()}" height="32px"> #{title} </h1>
+        </div>
       </div>
     </div>
   """
@@ -23,17 +27,21 @@ createPage = (slug, loc, title=null) ->
   $page
 
 showPage = (slug, loc, title=null) ->
-  createPage(slug, loc, title).appendTo('.main').each refresh.cycle
+  createPage(slug, loc, title).appendTo('.main').each((_i, e) -> refresh.cycle($(e)))
 
-doInternalLink = (name, $page, site=null) ->
-  slug = asSlug(name)
+doInternalLink = (title, $page, site=null) ->
+  slug = asSlug(title)
   $($page).nextAll().remove() if $page?
   lineup.removeAllAfterKey $($page).data('key') if $page?
-  showPage(slug,site,name)
+  showPage(slug, site, title)
   active.set($('.page').last())
 
-showResult = (pageObject) ->
-  $page = createPage(pageObject.getSlug()).addClass('ghost')
+showResult = (pageObject, options={}) ->
+  $(options.$page).nextAll().remove() if options.$page?
+  lineup.removeAllAfterKey $(options.$page).data('key') if options.$page?
+  slug = pageObject.getSlug()
+  slug += "_rev#{options.rev}" if options.rev?
+  $page = createPage(slug).addClass('ghost')
   $page.appendTo($('.main'))
   refresh.buildPage( pageObject, $page )
   active.set($('.page').last())

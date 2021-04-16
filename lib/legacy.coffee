@@ -12,8 +12,29 @@ drop = require './drop'
 dialog = require './dialog'
 link = require './link'
 target = require './target'
+license = require './license'
+plugin = require './plugin'
 
 asSlug = require('./page').asSlug
+newPage = require('./page').newPage
+
+preLoadEditors = (catalog) ->
+  catalog
+    .filter((entry) -> entry.editor)
+    .forEach((entry) ->
+      console.log("#{entry.name} Plugin declares an editor, so pre-loading the plugin")
+      wiki.getPlugin(entry.name.toLowerCase(), (plugin) ->
+          if ! plugin.editor or typeof plugin.editor != 'function'
+            console.log("""#{entry.name} Plugin ERROR.
+              Cannot find `editor` function in plugin. Set `"editor": false` in factory.json or
+              Correct the plugin to include all three of `{emit, bind, editor}`
+              """)
+        )
+    )
+
+wiki.origin.get 'system/factories.json', (error, data) ->
+  window.catalog = data
+  preLoadEditors data
 
 $ ->
   dialog.emit()
@@ -28,11 +49,14 @@ $ ->
     direction = switch event.which
       when LEFTARROW then -1
       when RIGHTARROW then +1
-    if direction && not (event.target.tagName is "TEXTAREA")
+    if direction && not $(event.target).is(":input")
       pages = $('.page')
       newIndex = pages.index($('.active')) + direction
       if 0 <= newIndex < pages.length
         active.set(pages.eq(newIndex))
+    if (event.ctrlKey || event.metaKey) and event.which == 83 #ctrl-s for search
+      event.preventDefault()
+      $('input.search').focus()
 
 # HANDLERS for jQuery events
 
@@ -49,6 +73,41 @@ $ ->
       #   </li>
       # """
 
+  commas = (number) ->
+    "#{number}".replace /(\d)(?=(\d\d\d)+(?!\d))/g, "$1,"
+
+  readFile = (file) ->
+    if file?.type == 'application/json'
+      reader = new FileReader()
+      reader.onload = (e) ->
+        result = e.target.result
+        pages = JSON.parse result
+        resultPage = newPage()
+        resultPage.setTitle "Import from #{file.name}"
+        resultPage.addParagraph """
+          Import of #{Object.keys(pages).length} pages
+          (#{commas file.size} bytes)
+          from an export file dated #{file.lastModifiedDate}.
+        """
+        resultPage.addItem {type: 'importer', pages: pages}
+        link.showResult resultPage
+      reader.readAsText(file)
+
+  deletePage = (pageObject, $page) ->
+    console.log 'fork to delete'
+    pageHandler.delete pageObject, $page, (err) ->
+      return if err?
+      console.log 'server delete successful'
+      if pageObject.isRecycler()
+        # make recycler page into a ghost
+        $page.addClass('ghost')
+      else
+        futurePage = refresh.newFuturePage(pageObject.getTitle(), pageObject.getCreate())
+        pageObject.become futurePage
+        $page.attr 'id', futurePage.getSlug()
+        refresh.rebuildPage pageObject, $page
+        $page.addClass('ghost')
+
   getTemplate = (slug, done) ->
     return done(null) unless slug
     console.log 'getTemplate', slug
@@ -63,10 +122,53 @@ $ ->
     link.doInternalLink name, page, $(e.target).data('site')
     return false
 
+  originalPageIndex = null
   $('.main')
+    .sortable({handle: '.page-handle', cursor: 'grabbing'})
+      .on 'sortstart', (evt, ui) ->
+        return if not ui.item.hasClass('page')
+        noScroll = true
+        active.set ui.item, noScroll
+        originalPageIndex = $(".page").index(ui.item[0])
+      .on 'sort', (evt, ui) ->
+        return if not ui.item.hasClass('page')
+        $page = ui.item
+        # Only mark for removal if there's more than one page (+placeholder) left
+        if evt.pageY < 0 and $(".page").length > 2
+          $page.addClass('pending-remove')
+        else
+          $page.removeClass('pending-remove')
+
+      .on 'sortstop', (evt, ui) ->
+        return if not ui.item.hasClass('page')
+        $page = ui.item
+        $pages = $('.page')
+        index = $pages.index($('.active'))
+        firstItemIndex = $('.item').index($page.find('.item')[0])
+        if $page.hasClass('pending-remove')
+          return if $pages.length == 1
+          lineup.removeKey($page.data('key'))
+          $page.remove()
+          active.set($('.page')[index])
+        else
+          lineup.changePageIndex($page.data('key'), index)
+          active.set $('.active')
+          if originalPageIndex < index
+            index = originalPageIndex
+            firstItemIndex = $('.item').index($($('.page')[index]).find('.item')[0])
+        plugin.renderFrom firstItemIndex
+        state.setUrl()
+        state.debugStates()
+
+    .delegate '.show-page-license', 'click', (e) ->
+      e.preventDefault()
+      $page = $(this).parents('.page')
+      title = $page.find('h1').text().trim()
+      dialog.open "License for #{title}", license.info($page)
+
     .delegate '.show-page-source', 'click', (e) ->
       e.preventDefault()
-      $page = $(this).parent().parent()
+      $page = $(this).parents('.page')
       page = lineup.atKey($page.data('key')).getRawPage()
       dialog.open "JSON for #{page.title}",  $('<pre/>').text(JSON.stringify(page, null, 2))
 
@@ -74,16 +176,24 @@ $ ->
       active.set this unless $(e.target).is("a")
 
     .delegate '.internal', 'click', (e) ->
-      name = $(e.target).text()
+      $link = $(e.target)
+      title = $link.text() or $link.data 'pageName'
       # ensure that name is a string (using string interpolation)
-      name = "#{name}"
+      title = "#{title}"
       pageHandler.context = $(e.target).attr('title').split(' => ')
-      finishClick e, name
+      finishClick e, title
 
     .delegate 'img.remote', 'click', (e) ->
-      name = $(e.target).data('slug')
-      pageHandler.context = [$(e.target).data('site')]
-      finishClick e, name
+      # expand to handle click on temporary flag
+      if $(e.target).attr('src').startsWith('data:image/png')
+        e.preventDefault()
+        site = $(e.target).data('site')
+        wiki.site(site).refresh () ->
+          # empty function...
+      else
+        name = $(e.target).data('slug')
+        pageHandler.context = [$(e.target).data('site')]
+        finishClick e, name
 
     .delegate '.revision', 'dblclick', (e) ->
       e.preventDefault()
@@ -110,22 +220,29 @@ $ ->
         lineup.removeAllAfterKey(key) unless e.shiftKey
         link.createPage("#{slug}_rev#{rev}", $page.data('site'))
           .appendTo($('.main'))
-          .each refresh.cycle
+          .each (_i, e) ->
+            refresh.cycle $(e)
         active.set($('.page').last())
 
     .delegate '.fork-page', 'click', (e) ->
       $page = $(e.target).parents('.page')
+      return if $page.find('.future').length
       pageObject = lineup.atKey $page.data('key')
-      action = {type: 'fork'}
-      if $page.hasClass('local')
-        return if pageHandler.useLocalStorage()
-        $page.removeClass('local')
-      else if pageObject.isRemote()
-        action.site = pageObject.getRemoteSite()
-      if $page.data('rev')?
-        $page.removeClass('ghost')
-        $page.find('.revision').remove()
-      pageHandler.put $page, action
+      if $page.attr('id').match /_rev0$/
+        deletePage pageObject, $page
+      else
+        action = {type: 'fork'}
+        if $page.hasClass('local')
+          return if pageHandler.useLocalStorage()
+          $page.removeClass('local')
+        else if pageObject.isRecycler()
+          $page.removeClass('recycler')
+        else if pageObject.isRemote()
+          action.site = pageObject.getRemoteSite()
+        if $page.data('rev')?
+          $page.find('.revision').remove()
+        $page.removeClass 'ghost'
+        pageHandler.put $page, action
 
     .delegate 'button.create', 'click', (e) ->
       getTemplate $(e.target).data('slug'), (template) ->
@@ -137,13 +254,46 @@ $ ->
         refresh.rebuildPage pageObject, $page.empty()
         pageHandler.put $page, {type: 'create', id: page.id, item: {title:page.title, story:page.story}}
 
-    .delegate '.score', 'hover', (e) ->
+    .delegate '.score', 'mouseenter mouseleave', (e) ->
+      console.log "in .score..."
       $('.main').trigger 'thumb', $(e.target).data('thumb')
+
+    .delegate 'a.search', 'click', (e) ->
+      $page = $(e.target).parents('.page')
+      key = $page.data('key')
+      pageObject = lineup.atKey key
+      resultPage = newPage()
+      resultPage.setTitle "Search from '#{pageObject.getTitle()}'"
+      resultPage.addParagraph """
+          Search for pages related to '#{pageObject.getTitle()}'.
+          Each search on this page will find pages related in a different way.
+          Choose the search of interest. Be patient.
+      """
+      resultPage.addParagraph "Find pages with links to this title."
+      resultPage.addItem
+        type: 'search'
+        text: "SEARCH LINKS #{pageObject.getSlug()}"
+      resultPage.addParagraph "Find pages with titles similar to this title."
+      resultPage.addItem
+        type: 'search'
+        text: "SEARCH SLUGS #{pageObject.getSlug()}"
+      resultPage.addParagraph "Find pages neighboring  this site."
+      resultPage.addItem
+        type: 'search'
+        text: "SEARCH SITES #{pageObject.getRemoteSite(location.host)}"
+      resultPage.addParagraph "Find pages sharing any of these items."
+      resultPage.addItem
+        type: 'search'
+        text: "SEARCH ANY ITEMS #{(item.id for item in pageObject.getRawPage().story).join ' '}"
+      $page.nextAll().remove() unless e.shiftKey
+      lineup.removeAllAfterKey(key) unless e.shiftKey
+      link.showResult resultPage
 
     .bind 'dragenter', (evt) -> evt.preventDefault()
     .bind 'dragover', (evt) -> evt.preventDefault()
     .bind "drop", drop.dispatch
       page: (item) -> link.doInternalLink item.slug, null, item.site
+      file: (file) -> readFile file
 
   $(".provider input").click ->
     $("footer input:first").val $(this).attr('data-provider')
@@ -152,18 +302,67 @@ $ ->
   $('body').on 'new-neighbor-done', (e, neighbor) ->
     $('.page').each (index, element) ->
       refresh.emitTwins $(element)
+      # refresh backlinks??
 
-  lineupActivity = require './lineupActivity'
-  $("<span class=menu> &nbsp; &equiv; &nbsp; </span>")
-    .css({"cursor":"pointer", "font-size": "120%"})
+  getPluginReference = (title) ->
+    return new Promise((resolve, reject) ->
+      slug = asSlug(title)
+      wiki.origin.get "#{slug}.json", (error, data) ->
+        resolve {
+          title,
+          slug,
+          type: "reference",
+          text: (if error then error.msg else data?.story[0].text) or ""
+        }
+      )
+
+  $("<span>&nbsp; ☰ </span>")
+    .css({"cursor":"pointer"})
     .appendTo('footer')
     .click ->
-      dialog.open "Lineup Activity", lineupActivity.show()
+      resultPage = newPage()
+      resultPage.setTitle "Selected Plugin Pages"
+      resultPage.addParagraph """
+        Installed plugins offer these utility pages:
+      """
+      return unless window.catalog
+
+      titles = []
+      for info in window.catalog
+        if info.pages
+          for title in info.pages
+            titles.push title
+
+      Promise.all(titles.map(getPluginReference)).then (items) ->
+        items.forEach (item) ->
+          resultPage.addItem item
+        link.showResult resultPage
+
+  # $('.editEnable').is(':visible')
+  $("<span>&nbsp; wiki <span class=editEnable>✔︎</span> &nbsp; </span>")
+    .css({"cursor":"pointer"})
+    .appendTo('footer')
+    .click ->
+      $('.editEnable').toggle()
+      $('.page').each ->
+        $page = $(this)
+        pageObject = lineup.atKey $page.data('key')
+        refresh.rebuildPage pageObject, $page.empty()
+  $('.editEnable').toggle() unless isAuthenticated
 
   target.bind()
 
-
   $ ->
     state.first()
-    $('.page').each refresh.cycle
-    active.set($('.page').last())
+    pages = $('.page').toArray()
+    # Render pages in order
+    # Emits and "bind creations" for the previous page must be complete before we start
+    # rendering the next page or plugin bind ordering will not work
+    renderNextPage = (pages) ->
+      if pages.length == 0
+        active.set($('.page').last())
+        return
+      $page = $(pages.shift())
+      refresh.cycle($page).then () ->
+        renderNextPage(pages)
+    renderNextPage(pages)

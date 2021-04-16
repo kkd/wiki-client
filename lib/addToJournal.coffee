@@ -7,7 +7,9 @@ actionSymbols = require './actionSymbols'
 
 module.exports = ($journal, action) ->
   $page = $journal.parents('.page:first')
-  title = action.type || 'separator'
+  title = ''
+  title += "#{action.site}\n" if action.site?
+  title += action.type || 'separator'
   title += " #{util.formatElapsedTime(action.date)}" if action.date?
   $action = $("""<a href="#" /> """).addClass("action").addClass(action.type || 'separator')
     .text(action.symbol || actionSymbols.symbols[action.type])
@@ -21,8 +23,8 @@ module.exports = ($journal, action) ->
     $action.appendTo($journal)
   if action.type == 'fork' and action.site?
     $action
-      .css("background-image", "url(//#{action.site}/favicon.png)")
-      .attr("href", "//#{action.site}/#{$page.attr('id')}.html")
+      .css("background-image", "url(#{wiki.site(action.site).flag()}")
+      .attr("href", "#{wiki.site(action.site).getDirectURL($page.attr('id'))}.html")
       .attr("target", "#{action.site}")
       .data("site", action.site)
       .data("slug", $page.attr('id'))
